@@ -10,14 +10,14 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# Configuration améliorée
-SEQUENCE_LENGTH = 30  # Réduit pour éviter le surapprentissage
-BATCH_SIZE = 16
-EPOCHS = 100
-LEARNING_RATE = 0.0005
-HIDDEN_SIZE = 64
+# Configuration optimisée
+SEQUENCE_LENGTH = 60  # Augmenté pour plus de contexte
+BATCH_SIZE = 32
+EPOCHS = 150
+LEARNING_RATE = 0.0003
+HIDDEN_SIZE = 128
 NUM_LAYERS = 3
-DROPOUT = 0.3
+DROPOUT = 0.2
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 print(f"🔧 Device: {DEVICE}")
@@ -52,23 +52,69 @@ def add_features(df):
     df['day_of_week'] = df['date'].dt.dayofweek
     df['month'] = df['date'].dt.month
     df['day_of_month'] = df['date'].dt.day
+    df['quarter'] = df['date'].dt.quarter
+    df['week_of_year'] = df['date'].dt.isocalendar().week
 
     # Features techniques (moyennes mobiles)
-    df['ma_7'] = df['exchange_rate'].rolling(window=7, min_periods=1).mean()
-    df['ma_30'] = df['exchange_rate'].rolling(window=30, min_periods=1).mean()
-    df['ma_90'] = df['exchange_rate'].rolling(window=90, min_periods=1).mean()
+    df['ma_5'] = df['exchange_rate'].rolling(window=5, min_periods=1).mean()
+    df['ma_10'] = df['exchange_rate'].rolling(window=10, min_periods=1).mean()
+    df['ma_20'] = df['exchange_rate'].rolling(window=20, min_periods=1).mean()
+    df['ma_50'] = df['exchange_rate'].rolling(window=50, min_periods=1).mean()
+    df['ma_100'] = df['exchange_rate'].rolling(window=100, min_periods=1).mean()
 
-    # Volatilité
-    df['std_7'] = df['exchange_rate'].rolling(window=7, min_periods=1).std()
-    df['std_30'] = df['exchange_rate'].rolling(window=30, min_periods=1).std()
+    # Exponential Moving Averages
+    df['ema_12'] = df['exchange_rate'].ewm(span=12, adjust=False).mean()
+    df['ema_26'] = df['exchange_rate'].ewm(span=26, adjust=False).mean()
 
-    # Returns
+    # MACD
+    df['macd'] = df['ema_12'] - df['ema_26']
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+
+    # Bollinger Bands
+    df['bb_middle'] = df['exchange_rate'].rolling(window=20, min_periods=1).mean()
+    df['bb_std'] = df['exchange_rate'].rolling(window=20, min_periods=1).std()
+    df['bb_upper'] = df['bb_middle'] + (df['bb_std'] * 2)
+    df['bb_lower'] = df['bb_middle'] - (df['bb_std'] * 2)
+    df['bb_width'] = df['bb_upper'] - df['bb_lower']
+    df['bb_position'] = (df['exchange_rate'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+
+    # Volatilité multiple horizons
+    df['std_5'] = df['exchange_rate'].rolling(window=5, min_periods=1).std()
+    df['std_10'] = df['exchange_rate'].rolling(window=10, min_periods=1).std()
+    df['std_20'] = df['exchange_rate'].rolling(window=20, min_periods=1).std()
+
+    # Returns multiples horizons
     df['return_1d'] = df['exchange_rate'].pct_change(1)
-    df['return_7d'] = df['exchange_rate'].pct_change(7)
+    df['return_3d'] = df['exchange_rate'].pct_change(3)
+    df['return_5d'] = df['exchange_rate'].pct_change(5)
+    df['return_10d'] = df['exchange_rate'].pct_change(10)
 
     # Momentum
+    df['momentum_3'] = df['exchange_rate'] - df['exchange_rate'].shift(3)
     df['momentum_5'] = df['exchange_rate'] - df['exchange_rate'].shift(5)
     df['momentum_10'] = df['exchange_rate'] - df['exchange_rate'].shift(10)
+    df['momentum_20'] = df['exchange_rate'] - df['exchange_rate'].shift(20)
+
+    # RSI (Relative Strength Index)
+    delta = df['exchange_rate'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=1).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=1).mean()
+    rs = gain / (loss + 1e-10)
+    df['rsi'] = 100 - (100 / (1 + rs))
+
+    # Rate of Change
+    df['roc'] = ((df['exchange_rate'] - df['exchange_rate'].shift(10)) / df['exchange_rate'].shift(10)) * 100
+
+    # Volume proxy (volatilité comme proxy)
+    df['volume_proxy'] = df['exchange_rate'].rolling(window=20, min_periods=1).std() * df['exchange_rate']
+
+    # Distance from moving averages
+    df['dist_ma_20'] = df['exchange_rate'] - df['ma_20']
+    df['dist_ma_50'] = df['exchange_rate'] - df['ma_50']
+
+    # Trend indicators
+    df['trend_5'] = df['ma_5'] - df['ma_10']
+    df['trend_20'] = df['ma_20'] - df['ma_50']
 
     # Remplir les NaN
     df = df.fillna(method='bfill').fillna(method='ffill')
@@ -80,10 +126,27 @@ train_df = add_features(train_df)
 val_df = add_features(val_df)
 test_df = add_features(test_df)
 
-# Sélection des features
-feature_cols = ['exchange_rate', 'ma_7', 'ma_30', 'ma_90', 'std_7', 'std_30',
-                'return_1d', 'return_7d', 'momentum_5', 'momentum_10',
-                'day_of_week', 'month']
+# Sélection des features (toutes les nouvelles features)
+feature_cols = ['exchange_rate',
+                # Moving averages
+                'ma_5', 'ma_10', 'ma_20', 'ma_50', 'ma_100',
+                'ema_12', 'ema_26',
+                # MACD
+                'macd', 'macd_signal',
+                # Bollinger Bands
+                'bb_middle', 'bb_width', 'bb_position',
+                # Volatilité
+                'std_5', 'std_10', 'std_20',
+                # Returns
+                'return_1d', 'return_3d', 'return_5d', 'return_10d',
+                # Momentum
+                'momentum_3', 'momentum_5', 'momentum_10', 'momentum_20',
+                # Indicators
+                'rsi', 'roc', 'volume_proxy',
+                # Distance & Trend
+                'dist_ma_20', 'dist_ma_50', 'trend_5', 'trend_20',
+                # Temporal
+                'day_of_week', 'month', 'quarter']
 
 # Normalisation
 scaler = MinMaxScaler(feature_range=(-1, 1))
@@ -124,60 +187,73 @@ print(f"✅ {len(train_dataset)} séquences d'entraînement")
 
 # ==================== 4. MODÈLE AMÉLIORÉ ====================
 class ImprovedForexLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size=64, num_layers=3, dropout=0.3):
+    def __init__(self, input_size, hidden_size=128, num_layers=3, dropout=0.2):
         super(ImprovedForexLSTM, self).__init__()
 
+        # Input projection
+        self.input_proj = nn.Linear(input_size, hidden_size)
+
+        # LSTM bidirectionnel
         self.lstm = nn.LSTM(
-            input_size=input_size,
+            input_size=hidden_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            dropout=dropout,
+            dropout=dropout if num_layers > 1 else 0,
             batch_first=True,
-            bidirectional=True  # Bidirectionnel pour capturer plus de contexte
+            bidirectional=True
         )
 
-        # Attention mechanism
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size * 2, hidden_size),
-            nn.Tanh(),
-            nn.Linear(hidden_size, 1)
+        # Multi-head attention
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_size * 2,
+            num_heads=4,
+            dropout=dropout,
+            batch_first=True
         )
 
-        # Fully connected layers avec skip connection
-        self.fc1 = nn.Linear(hidden_size * 2, 128)
-        self.bn1 = nn.BatchNorm1d(128)
-        self.dropout1 = nn.Dropout(dropout)
+        # Layer normalization
+        self.ln1 = nn.LayerNorm(hidden_size * 2)
+        self.ln2 = nn.LayerNorm(256)
+        self.ln3 = nn.LayerNorm(128)
 
-        self.fc2 = nn.Linear(128, 64)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.dropout2 = nn.Dropout(dropout)
+        # Fully connected avec residual
+        self.fc1 = nn.Linear(hidden_size * 2, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, 64)
+        self.fc_out = nn.Linear(64, 1)
 
-        self.fc3 = nn.Linear(64, 32)
-        self.fc_out = nn.Linear(32, 1)
-
+        self.dropout = nn.Dropout(dropout)
         self.relu = nn.ReLU()
+        self.gelu = nn.GELU()
 
     def forward(self, x):
+        # Input projection
+        x = self.input_proj(x)
+
         # LSTM
         lstm_out, _ = self.lstm(x)
 
-        # Attention weights
-        attn_weights = torch.softmax(self.attention(lstm_out), dim=1)
-        context = torch.sum(attn_weights * lstm_out, dim=1)
+        # Multi-head attention
+        attn_out, _ = self.attention(lstm_out, lstm_out, lstm_out)
+        attn_out = self.ln1(attn_out + lstm_out)  # Residual connection
 
-        # Fully connected avec batch norm
+        # Global average pooling
+        context = torch.mean(attn_out, dim=1)
+
+        # Fully connected layers
         out = self.fc1(context)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.dropout1(out)
+        out = self.ln2(out)
+        out = self.gelu(out)
+        out = self.dropout(out)
 
         out = self.fc2(out)
-        out = self.bn2(out)
-        out = self.relu(out)
-        out = self.dropout2(out)
+        out = self.ln3(out)
+        out = self.gelu(out)
+        out = self.dropout(out)
 
         out = self.fc3(out)
         out = self.relu(out)
+
         out = self.fc_out(out)
 
         return out
@@ -191,9 +267,16 @@ model = ImprovedForexLSTM(
     dropout=DROPOUT
 ).to(DEVICE)
 
-criterion = nn.HuberLoss()  # Plus robuste que MSE
-optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+criterion = nn.SmoothL1Loss()  # Huber loss avec beta=1
+optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=LEARNING_RATE * 10,
+    epochs=EPOCHS,
+    steps_per_epoch=len(train_loader),
+    pct_start=0.3,
+    anneal_strategy='cos'
+)
 
 print(f"✅ Modèle créé avec {sum(p.numel() for p in model.parameters()):,} paramètres")
 
@@ -203,7 +286,7 @@ print("\n🚀 Entraînement du modèle...")
 train_losses = []
 val_losses = []
 best_val_loss = float('inf')
-patience = 15
+patience = 20
 patience_counter = 0
 
 for epoch in range(EPOCHS):
@@ -217,8 +300,9 @@ for epoch in range(EPOCHS):
         predictions = model(X_batch)
         loss = criterion(predictions, y_batch)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
         optimizer.step()
+        scheduler.step()  # Step par batch pour OneCycleLR
 
         train_loss += loss.item()
 
@@ -237,10 +321,9 @@ for epoch in range(EPOCHS):
     train_losses.append(train_loss)
     val_losses.append(val_loss)
 
-    scheduler.step()
-
     if (epoch + 1) % 10 == 0:
-        print(f"Epoch [{epoch + 1}/{EPOCHS}] - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch [{epoch + 1}/{EPOCHS}] - Train: {train_loss:.6f}, Val: {val_loss:.6f}, LR: {current_lr:.6f}")
 
     # Early stopping
     if val_loss < best_val_loss:
